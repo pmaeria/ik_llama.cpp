@@ -106,6 +106,7 @@ lcov-report/
 # Python
 
 /.venv
+/.bench-cache/
 __pycache__/
 */poetry.lock
 poetry.toml
