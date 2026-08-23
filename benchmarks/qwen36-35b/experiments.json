@@ -1,0 +1,267 @@
+{
+  "schema_version": 1,
+  "experiment_id": "EXP-0001",
+  "title": "Qwen3.6-35B-A3B single-GPU baseline",
+  "target": {
+    "checkpoint": "Qwen3.6-35B-A3B",
+    "required_filename_terms": ["qwen", "3.6", "35b"],
+    "rejected_filename_terms": ["qwen3.5", "qwen-3.5", "qwen_3.5"],
+    "gpu": "NVIDIA RTX 4060 Ti 16 GB",
+    "backend": "CUDA",
+    "compute_capability": "SM89",
+    "devices": 1,
+    "parallel_slots": 1,
+    "mtp": false
+  },
+  "defaults": {
+    "rounds": 2,
+    "repetitions_per_process": 1,
+    "warmup": true,
+    "timeout_seconds": 7200,
+    "gpu_sample_interval_seconds": 1.0,
+    "machine_id": "paul-4060ti",
+    "batch_size": 2048,
+    "ubatch_size": 512,
+    "fit_margin_mib": 1024,
+    "correctness_tokens": 96,
+    "correctness_context": 8192,
+    "seed": 36036
+  },
+  "tests": {
+    "pp256": {
+      "args": ["-p", "256"],
+      "description": "smoke prompt processing"
+    },
+    "tg64": {
+      "args": ["-n", "64"],
+      "description": "smoke token generation"
+    },
+    "pp512": {
+      "args": ["-p", "512"],
+      "description": "short prompt processing"
+    },
+    "tg256": {
+      "args": ["-n", "256"],
+      "description": "steady batch-one token generation"
+    },
+    "gp8192_256": {
+      "args": ["-gp", "8192,256"],
+      "description": "256-token generation after an 8K synthetic prompt"
+    },
+    "gp32768_256": {
+      "args": ["-gp", "32768,256"],
+      "description": "256-token generation after a 32K synthetic prompt"
+    },
+    "gp65536_128": {
+      "args": ["-gp", "65536,128"],
+      "description": "extended 64K-context generation test"
+    }
+  },
+  "configs": {
+    "fit-default": {
+      "required": true,
+      "description": "Primary current-runtime candidate: fit, fused MoE, graph reuse, active-expert-only offload, f16 KV",
+      "bench_args": [
+        "-ngl", "999",
+        "-sm", "layer",
+        "-mg", "0",
+        "--fit", "1",
+        "--fit-margin", "{fit_margin_mib}",
+        "-fa", "1",
+        "-fmoe", "1",
+        "-gr", "1",
+        "-no-ooae", "0",
+        "-ctk", "f16",
+        "-ctv", "f16",
+        "-rtr", "0",
+        "-muge", "0",
+        "-sas", "0"
+      ]
+    },
+    "fit-q8kv": {
+      "required": false,
+      "description": "Existing q8 KV candidate; may free VRAM for a better fit",
+      "bench_args": [
+        "-ngl", "999",
+        "-sm", "layer",
+        "-mg", "0",
+        "--fit", "1",
+        "--fit-margin", "{fit_margin_mib}",
+        "-fa", "1",
+        "-fmoe", "1",
+        "-gr", "1",
+        "-no-ooae", "0",
+        "-ctk", "q8_0",
+        "-ctv", "q8_0",
+        "-rtr", "0",
+        "-muge", "0",
+        "-sas", "0"
+      ]
+    },
+    "fit-k4-v8": {
+      "required": false,
+      "description": "Existing asymmetric q4 K / q8 V context-cache candidate",
+      "bench_args": [
+        "-ngl", "999",
+        "-sm", "layer",
+        "-mg", "0",
+        "--fit", "1",
+        "--fit-margin", "{fit_margin_mib}",
+        "-fa", "1",
+        "-fmoe", "1",
+        "-gr", "1",
+        "-no-ooae", "0",
+        "-ctk", "q4_0",
+        "-ctv", "q8_0",
+        "-rtr", "0",
+        "-muge", "0",
+        "-sas", "0"
+      ]
+    },
+    "fit-no-active-only": {
+      "required": false,
+      "description": "Control: disable offload-only-active-experts",
+      "bench_args": [
+        "-ngl", "999",
+        "-sm", "layer",
+        "-mg", "0",
+        "--fit", "1",
+        "--fit-margin", "{fit_margin_mib}",
+        "-fa", "1",
+        "-fmoe", "1",
+        "-gr", "1",
+        "-no-ooae", "1",
+        "-ctk", "f16",
+        "-ctv", "f16",
+        "-rtr", "0",
+        "-muge", "0",
+        "-sas", "0"
+      ]
+    },
+    "fit-no-fused-moe": {
+      "required": false,
+      "description": "Control: disable fused MoE",
+      "bench_args": [
+        "-ngl", "999",
+        "-sm", "layer",
+        "-mg", "0",
+        "--fit", "1",
+        "--fit-margin", "{fit_margin_mib}",
+        "-fa", "1",
+        "-fmoe", "0",
+        "-gr", "1",
+        "-no-ooae", "0",
+        "-ctk", "f16",
+        "-ctv", "f16",
+        "-rtr", "0",
+        "-muge", "0",
+        "-sas", "0"
+      ]
+    },
+    "fit-no-graph-reuse": {
+      "required": false,
+      "description": "Control: disable graph reuse",
+      "bench_args": [
+        "-ngl", "999",
+        "-sm", "layer",
+        "-mg", "0",
+        "--fit", "1",
+        "--fit-margin", "{fit_margin_mib}",
+        "-fa", "1",
+        "-fmoe", "1",
+        "-gr", "0",
+        "-no-ooae", "0",
+        "-ctk", "f16",
+        "-ctv", "f16",
+        "-rtr", "0",
+        "-muge", "0",
+        "-sas", "0"
+      ]
+    },
+    "fit-merged-up-gate": {
+      "required": false,
+      "description": "Extended candidate: merge expert up/gate tensors",
+      "bench_args": [
+        "-ngl", "999",
+        "-sm", "layer",
+        "-mg", "0",
+        "--fit", "1",
+        "--fit-margin", "{fit_margin_mib}",
+        "-fa", "1",
+        "-fmoe", "1",
+        "-gr", "1",
+        "-no-ooae", "0",
+        "-ctk", "f16",
+        "-ctv", "f16",
+        "-rtr", "0",
+        "-muge", "1",
+        "-sas", "0"
+      ]
+    },
+    "fit-scheduler-async": {
+      "required": false,
+      "description": "Extended candidate: asynchronous scheduler",
+      "bench_args": [
+        "-ngl", "999",
+        "-sm", "layer",
+        "-mg", "0",
+        "--fit", "1",
+        "--fit-margin", "{fit_margin_mib}",
+        "-fa", "1",
+        "-fmoe", "1",
+        "-gr", "1",
+        "-no-ooae", "0",
+        "-ctk", "f16",
+        "-ctv", "f16",
+        "-rtr", "0",
+        "-muge", "0",
+        "-sas", "1"
+      ]
+    }
+  },
+  "suites": {
+    "smoke": {
+      "rounds": 1,
+      "configs": ["fit-default"],
+      "tests": ["pp256", "tg64"],
+      "correctness_prompts": ["short_chat.txt"]
+    },
+    "baseline": {
+      "rounds": 2,
+      "configs": [
+        "fit-default",
+        "fit-q8kv",
+        "fit-no-active-only",
+        "fit-no-fused-moe",
+        "fit-no-graph-reuse"
+      ],
+      "tests": ["pp512", "tg256", "gp8192_256", "gp32768_256"],
+      "correctness_prompts": ["short_chat.txt", "tool_json.txt"]
+    },
+    "extended": {
+      "rounds": 2,
+      "configs": [
+        "fit-default",
+        "fit-q8kv",
+        "fit-k4-v8",
+        "fit-no-active-only",
+        "fit-no-fused-moe",
+        "fit-no-graph-reuse",
+        "fit-merged-up-gate",
+        "fit-scheduler-async"
+      ],
+      "tests": ["pp512", "tg256", "gp8192_256", "gp32768_256", "gp65536_128"],
+      "correctness_prompts": ["short_chat.txt", "code_generation.txt", "tool_json.txt"]
+    }
+  },
+  "correctness": {
+    "config": "fit-default",
+    "base_cli_args": [
+      "-ngl", "999",
+      "--fit",
+      "--fit-margin", "{fit_margin_mib}",
+      "-ctk", "f16",
+      "-ctv", "f16"
+    ]
+  }
+}
