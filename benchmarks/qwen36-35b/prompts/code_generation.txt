@@ -1,0 +1,5 @@
+Write a single self-contained C++17 function named `stable_partition_ids` with this signature:
+
+std::vector<int> stable_partition_ids(const std::vector<int>& ids, const std::vector<bool>& is_hit);
+
+Return all IDs whose corresponding `is_hit` value is true first, followed by all misses, while preserving relative order within each group. Throw `std::invalid_argument` when the vectors differ in length. Output only one fenced C++ code block containing the function and required includes. Do not include prose.
