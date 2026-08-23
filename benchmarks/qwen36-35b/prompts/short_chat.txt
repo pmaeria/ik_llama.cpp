@@ -1,0 +1,1 @@
+You are validating deterministic local inference. Explain in exactly six numbered sentences why a fixed-shape CUDA graph can help batch-one Mixture-of-Experts decoding. Mention expert routing, buffer addresses, and launch overhead. Do not use a heading, table, code block, or concluding paragraph.
