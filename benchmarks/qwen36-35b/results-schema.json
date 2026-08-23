@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/pmaeria/ik_llama.cpp/benchmarks/qwen36-35b/results-schema.json",
+  "title": "EXP-0001 Qwen3.6 evidence manifest",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "experiment_id",
+    "status",
+    "run_id",
+    "machine_id",
+    "suite",
+    "source",
+    "target",
+    "model",
+    "binaries"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "experiment_id": {
+      "const": "EXP-0001"
+    },
+    "status": {
+      "enum": [
+        "running",
+        "complete",
+        "complete_with_optional_failures",
+        "blocked"
+      ]
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "machine_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "suite": {
+      "enum": ["smoke", "baseline", "extended"]
+    },
+    "rounds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "source": {
+      "type": "object",
+      "required": ["commit", "branch", "dirty"],
+      "properties": {
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "dirty": {
+          "type": "boolean"
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "required": ["checkpoint", "gpu", "backend", "devices", "mtp"],
+      "properties": {
+        "checkpoint": {
+          "const": "Qwen3.6-35B-A3B"
+        },
+        "gpu": {
+          "type": "string"
+        },
+        "backend": {
+          "const": "CUDA"
+        },
+        "devices": {
+          "const": 1
+        },
+        "mtp": {
+          "const": false
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "required": ["filename", "sha256", "size_bytes"],
+      "properties": {
+        "filename": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1048576
+        }
+      }
+    },
+    "binaries": {
+      "type": "object",
+      "required": ["llama_bench", "llama_cli"]
+    },
+    "ready_to_commit": {
+      "type": "boolean"
+    }
+  }
+}

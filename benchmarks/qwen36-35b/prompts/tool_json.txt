@@ -1,0 +1,1 @@
+Return one compact JSON object and nothing else. It must contain these keys in this order: `action`, `model`, `gpu`, `measurements`, `mtp`. Set `action` to `benchmark`, `model` to `Qwen3.6-35B-A3B`, `gpu` to `RTX 4060 Ti 16GB`, `measurements` to an array containing `pp`, `tg`, `ttft`, and `h2d_bytes`, and `mtp` to false. Do not use Markdown.

@@ -1,0 +1,42 @@
+name: qwen36-exp-harness
+
+on:
+  pull_request:
+    paths:
+      - 'PLAN.md'
+      - 'benchmarks/qwen36-35b/**'
+      - '.github/workflows/qwen36-exp-harness.yml'
+  push:
+    branches:
+      - 'plan/qwen-single-gpu-inference-roadmap'
+    paths:
+      - 'PLAN.md'
+      - 'benchmarks/qwen36-35b/**'
+      - '.github/workflows/qwen36-exp-harness.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile Python harness
+        run: |
+          python -m py_compile \
+            benchmarks/qwen36-35b/run_experiment.py \
+            benchmarks/qwen36-35b/commit_results.py \
+            benchmarks/qwen36-35b/compare_results.py
+      - name: Validate JSON files
+        run: |
+          python -m json.tool benchmarks/qwen36-35b/experiments.json >/dev/null
+          python -m json.tool benchmarks/qwen36-35b/results-schema.json >/dev/null
+      - name: Verify Qwen3.6 target lock
+        run: |
+          grep -q 'Qwen3.6-35B-A3B' PLAN.md
+          grep -q 'Qwen3.6-35B-A3B' benchmarks/qwen36-35b/experiments.json
+          ! grep -q '"checkpoint": "Qwen3.5' benchmarks/qwen36-35b/experiments.json
