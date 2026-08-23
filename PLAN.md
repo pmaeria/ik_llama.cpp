@@ -1,937 +1,560 @@
-# GPU-First Qwen Inference Acceleration Plan
+# GPU-First Qwen3.6-35B-A3B Inference Acceleration Plan
 
 ## Mission
 
-Extend `ik_llama.cpp` into a faster **single-NVIDIA-GPU runtime for Qwen hybrid MoE models that exceed VRAM**, beginning with:
+Extend `ik_llama.cpp` into a faster single-NVIDIA-GPU runtime for **Qwen3.6-35B-A3B** when the model exceeds VRAM.
 
-- **GPU:** NVIDIA RTX 4060 Ti 16 GB, Ada, SM89
-- **Primary model:** Qwen3.6-35B-A3B
-- **Compatible family target:** Qwen3.5/3.6 hybrid Gated DeltaNet + MoE checkpoints with the same execution structure
-- **Workload:** batch-one local inference, especially coding agents and tool-using sessions
-- **Typical context:** 8K-32K initially, with 64K+ measured separately
-- **Primary objective:** improve end-to-end latency and token generation speed without changing the model's routing or output semantics
+Initial target:
 
-The project is **GPU-first**, not CPU-first. System RAM is initially treated as a backing store for model weights that cannot fit in VRAM. CPU execution remains available as a miss/fallback path only when real measurements show that it beats transferring the same work to the GPU.
+- checkpoint: Qwen3.6-35B-A3B only
+- GPU: NVIDIA RTX 4060 Ti 16 GB, Ada SM89
+- runtime: CUDA, one device, one active inference context
+- workload: batch-one local inference, especially coding agents and tool-using sessions
+- context: 8K-32K first; 64K+ measured separately
+- model format: one pinned GGUF and quant for each experiment
+- speculation: disabled for the primary baseline
+- objective: reduce end-to-end latency while preserving exact routing and model semantics
 
-The initial project is not a new inference runtime. It builds on the existing strengths of `ik_llama.cpp`:
+The repository may internally call the shared implementation `qwen35moe`; that is an architecture label. The checkpoint under test must be **Qwen3.6-35B-A3B**, never a Qwen3.5 checkpoint.
 
-- GGUF loading and mature quant support
-- `--fit` and manual tensor placement
-- hybrid CPU/GPU execution
+This is a GPU-first programme. System RAM is backing storage for weights that do not fit in VRAM. The first implementation keeps selected-expert computation on the GPU. New CPU/GPU co-execution policy is deferred until the best GPU-oriented path has been measured.
+
+The central question is:
+
+> Given a fixed 16 GB VRAM budget, which Qwen3.6 expert weights should be resident, which should be staged, and how can CUDA execute hits and misses without idle gaps or graph recapture?
+
+## Existing foundation
+
+The project builds on current `ik_llama.cpp` rather than creating a parallel model stack:
+
+- GGUF loading and IK/IQ/K quant support
+- `--fit` and explicit tensor placement
+- hybrid CPU/GPU model placement
 - active-expert-only offload
-- fused MoE and Qwen Gated DeltaNet paths
+- fused MoE paths
+- Qwen Gated DeltaNet support
 - CUDA graph reuse
-- prompt/context checkpoints
+- prompt and recurrent checkpoints
 - existing speculative modes
+- `llama-bench` and `sweep-bench`
 
-The central research question is:
-
-> Given a fixed 16 GB VRAM budget, which Qwen expert weights should be resident now, which should be fetched, and how should the GPU execute hits and misses with the least idle time?
-
----
-
-## Scope
-
-### In scope for the first programme
-
-1. Reproducible on-device benchmarking and profiling.
-2. Expert-routing and transfer telemetry with negligible overhead when disabled.
-3. A trace-driven cache simulator to establish whether expert locality is exploitable before invasive kernel work.
-4. A static hot-expert GPU cache as the first proof of value.
-5. A dynamic per-expert GPU cache using stable buffers and device-side indirection.
-6. Asynchronous expert promotion, prefetch, and eviction.
-7. A calibrated miss policy that chooses between GPU transfer and existing CPU execution.
-8. A separate high-throughput prefill mode using layer streaming/double buffering where useful.
-9. Qwen/SM89 kernel specialisation only after profiling identifies the actual bottlenecks.
-10. An adaptive VRAM budget that accounts for model tensors, compute workspace, context, and expert cache.
-
-### Explicitly deferred
-
-These remain valid future directions, but they must not distract from the initial inference work:
-
-- new weight quantisation formats
-- RotorQuant, TurboQuant, SAW-INT4, KIVI, or other new KV codecs
-- live Gated DeltaNet state quantisation
-- prompt summarisation or lossy context pruning
-- Apple Silicon / Metal support
-- multi-GPU execution
-- high-concurrency serving
-- model retraining or routing approximation
-- mandatory MTP integration
-
-Existing GGUF weight quants and existing `q8_0`/`q4_0` context-cache options remain benchmark variables. We will preserve clean interfaces so new weight and context codecs can be added later, but no new codec is required to prove the first inference gains.
+The likely missing opportunity is a graph-compatible GPU expert residency and staging layer that is more granular than whole expert tensors or whole layers.
 
 ---
 
-## Non-negotiable engineering rules
+# Non-negotiable rules
 
-### Measure before optimising
+## Keep comparisons exact
 
-Every optimisation must have:
+Performance comparisons must keep constant:
 
-- a named baseline
-- a reproducible command
-- a fixed model and quant
-- a representative workload
-- correctness checks
-- memory accounting
-- before/after timing on the target GPU
+- checkpoint and GGUF hash
+- tensor types and runtime repacking state
+- context size and K/V cache types
+- prompt and output lengths
+- sampling settings
+- active expert count and routing weights
+- number of slots and devices
 
-No optimisation is accepted on intuition or a synthetic microbenchmark alone.
+The cache must use the same quantized expert bytes whether an expert is resident, staged, or handled by the existing fallback. Cache state must not change precision or routing.
 
-### Keep output semantics exact
+## Measure end-to-end behaviour
 
-The initial expert-cache work must not:
+Every result must report, where applicable:
 
-- alter router logits
-- reduce the number of selected experts
-- change routing weights
-- substitute an approximate expert
-- change weight precision depending on cache state
-- silently alter sampling settings
-
-The same quantised expert bytes must be used whether an expert is resident, transferred, or executed through the fallback path. Small floating-point differences from operation ordering may occur, but greedy output and logits must be checked against the baseline.
-
-### Optimise end-to-end behaviour
-
-Token generation throughput is important, but the primary score is useful local-agent latency. The benchmark suite must report:
-
+- prompt-processing tokens/s
+- token-generation tokens/s
 - time to first token
-- prompt-processing throughput
-- token-generation throughput
-- p50/p95 inter-token latency
 - request wall time
+- p50 and p95 inter-token latency
 - peak and steady VRAM
 - host RAM and pinned-memory use
-- host-to-device bytes per generated token
-- GPU utilisation and idle gaps
-- cache hit rate and miss cost
+- H2D bytes per generated token
+- H2D wait time and overlap
+- GPU kernel time and idle gaps
+- CUDA graph capture/replay status
+- cache hit rate, admission rate, churn, and miss cost
 
-An optimisation that improves decode by 10% while making long agent prefills 20% slower is not automatically a win.
+A decode gain that materially worsens realistic coding-agent prefill is not automatically accepted.
 
-### Keep the fast path narrow
+## Fixed-shape graph before dynamic policy
 
-The first implementation may be specialised for:
+Stable buffer addresses are necessary but not sufficient for CUDA graph reuse. The optimized decode graph must also retain a fixed topology and fixed launch shapes.
 
-- one CUDA device
-- batch size one
-- Qwen3.5/3.6 MoE
-- supported existing quant layouts
-- fixed expert shapes
+The first viable design should assume:
 
-Generality should be added after the specialised path is proven. Unsupported combinations must fail closed or use the existing path.
+```text
+8 routed lanes per MoE layer
+8 hit lanes
+8 miss/staging lanes
+fixed masks
+fixed mapping tables
+fixed output and reduction buffers
+```
 
----
+IDs, masks, epochs, and slot mappings may change. Graph node count, buffer addresses, and tensor shapes must not change in the token loop.
 
-## Current integration points
+## Hard stop conditions
 
-The first implementation should reuse current execution and allocation machinery rather than create a parallel model stack.
-
-Likely integration points include:
-
-- `src/llama-load-tensors.cpp`
-  - existing `--fit`, CPU-MoE overrides, tensor placement, fused expert tensor construction
-- `src/llama-model-loader.cpp`
-  - weight provenance, GGUF offsets, host-backed tensors, pinned-memory loading
-- `src/llama-expert-io.h`
-  - existing expert ranges and deferred expert metadata
-- `src/graphs/build_qwen35.cpp`
-  - Qwen3.5/3.6 Gated DeltaNet and MoE graph construction
-  - calls into `llm_build_std_moe_ffn`
-- `src/llama-build-context.cpp` and `src/llama-build-context.h`
-  - common MoE graph construction and routing tensors
-- `ggml/src/ggml-backend.cpp`
-  - active-expert scheduling, backend copies, graph scheduling
-- `ggml/src/ggml-cuda/`
-  - indirect quantised matmul, fused MoE, routing, copy, and future cache kernels
-- `examples/llama-bench/` and `examples/sweep-bench/`
-  - repeatable performance and context-length measurements
-
-The existing on-demand tensor-reload machinery is useful prior art for tensor provenance, backend buffer replacement, and graph invalidation. The hot expert cache must not use file hot-swapping in the token-generation loop, but it may reuse or extract lower-level metadata concepts.
+Do not continue a complex cache implementation merely because it appears in this roadmap. Every stage has a decision gate and a cheaper pivot.
 
 ---
 
-# Phase 0 - Pin the baseline
+# Primary hypotheses
+
+## H1 - Current decode is materially limited by expert movement
+
+Measure selected expert bytes, H2D copy time, scheduler waits, and GPU idle gaps.
+
+Stop persistent-cache work when a perfect elimination of avoidable expert-transfer stalls predicts less than roughly 8-10% end-to-end improvement.
+
+## H2 - Routing locality is valuable at realistic VRAM budgets
+
+Simulate cache budgets only after subtracting the complete expert layers and workspace displaced by those budgets.
+
+Proceed when a practical budget predicts material H2D savings on more than one representative workload.
+
+## H3 - Compact dispatch is cheaper than the transfers it avoids
+
+A high theoretical hit rate is insufficient. Remapping, fragmented launches, masking, reduction, events, and graph constraints must be included in the cost model.
+
+The one-layer CUDA proof must beat the equivalent uncached path before model-wide work.
+
+## H4 - Decode gains survive prompt-heavy agent workloads
+
+Benchmark synthetic PP/TG separately and recorded multi-turn coding-agent traces end to end.
+
+Keep prefill and decode policies separate when required.
+
+---
+
+# Scope
+
+## Initial programme
+
+1. Reproducible local benchmark and evidence protocol.
+2. Exact checkpoint, quant, build, driver, and hardware fingerprinting.
+3. Roofline and transfer microbenchmarks.
+4. Expert-routing, copy, and CUDA-path telemetry.
+5. Offline placement and cache simulation.
+6. A one-layer fixed-shape CUDA feasibility proof.
+7. Profile-guided whole-layer placement and static hot experts.
+8. Fixed staging buffers and asynchronous GPU miss execution.
+9. Dynamic expert caching only when static evidence justifies it.
+10. Separate prefill and decode use of the same VRAM pool.
+11. Qwen3.6/SM89 kernel specialization only for measured bottlenecks.
+12. Integration with `--fit` and startup autotuning.
+
+## Deferred
+
+- Qwen3.5 checkpoints
+- Apple Metal or MLX
+- multiple GPUs
+- high-concurrency serving
+- new CPU/GPU q-star-style co-execution
+- model retraining or approximate routing
+- new weight quantization formats
+- RotorQuant, TurboQuant, SAW-INT4, KIVI, or other new KV codecs
+- live Gated DeltaNet state quantization
+- lossy prompt or KV-token pruning
+- mandatory MTP
+
+Existing weight and context quants remain benchmark variables. Interfaces should leave room for future codecs without making them prerequisites.
+
+---
+
+# Evidence loop
+
+The web/GitHub environment produces code and experiment definitions. The RTX 4060 Ti is the measurement authority.
+
+```text
+commit experiment
+    -> local agent follows handoff
+    -> build and run on RTX 4060 Ti
+    -> collect normalized evidence
+    -> commit and push result branch
+    -> analyse evidence here
+    -> commit next experiment
+```
+
+Every evidence bundle is append-only and identifies:
+
+- experiment ID
+- source commit
+- baseline commit
+- model SHA-256
+- exact command and flags
+- OS, CPU, RAM, GPU, PCIe, CUDA, driver, compiler
+- cold/warm state
+- raw output and normalized summary
+
+The local-agent protocol lives at:
+
+```text
+benchmarks/qwen36-35b/LOCAL_AGENT_HANDOFF.md
+```
+
+---
+
+# M0 - Exact baseline and external references
 
 ## Goal
 
-Create a trusted benchmark and correctness harness before changing execution.
+Establish the best existing `ik_llama.cpp` configuration before runtime changes.
 
-## Model and runtime matrix
+Pin:
 
-Use one pinned Qwen3.6-35B-A3B GGUF checkpoint and one pinned quant around the practical hybrid range, approximately 4.0-4.3 bits per weight. Do not change model or quant while comparing runtime changes.
+- one Qwen3.6-35B-A3B GGUF filename and SHA-256
+- one source checkpoint revision
+- whether MTP tensors exist, while leaving MTP disabled
+- exact tensor quant/layout profile
+- merged versus unmerged gate/up state
+- runtime repacking state
+- context and cache types
+- `n_batch`, `n_ubatch`, thread count, and fit margin
 
-Record:
+Initial workload set:
 
-- exact model repository and file hash
-- exact `ik_llama.cpp` commit
-- compiler and CUDA versions
-- NVIDIA driver
-- CPU and RAM configuration
-- PCIe negotiated generation and lane width
-- operating system
-- all command-line flags
-
-Baseline modes:
-
-1. Current `--fit`, MTP off.
-2. Best manually tuned `--n-cpu-moe` or tensor-override configuration, MTP off.
-3. Existing active-expert offload on and off.
-4. Existing fused MoE on and off.
-5. Existing graph reuse on and off.
-6. Existing q8 and q4 context cache where they fit.
-
-MTP is disabled for the primary baseline. It is measured later as an optional competitor for the same VRAM.
-
-## Workload matrix
-
-At minimum:
-
-| Workload | Prompt | Output | Purpose |
+| Test | Prompt | Output | Purpose |
 |---|---:|---:|---|
-| Short chat | 512-1K | 256 | steady batch-one decode |
-| Code generation | 2K-4K | 512 | structured output and likely expert locality |
-| Tool/JSON | 4K-8K | 256 | agent-shaped predictable output |
-| Long coding turn | 16K | 512 | realistic TTFT + decode |
-| Long agent trace | 32K | 256 | context and repeated-turn behaviour |
-| Open prose | 2K | 800 | less predictable decode control |
+| PP | 512 | 0 | short prefill |
+| TG | 0 | 256 | steady batch-one decode |
+| GP | 8K | 256 | ordinary agent context |
+| GP | 32K | 256 | long agent context |
+| CLI correctness | fixed prompts | 96-128 | deterministic output hashes |
 
-Run greedy decoding first for determinism, then a fixed sampled configuration for realistic use.
+Compare at least:
 
-## Required outputs
+- current `--fit` default candidate
+- tighter and safer fit margins where they load
+- active-expert-only offload enabled versus disabled
+- fused MoE enabled versus disabled
+- graph reuse enabled versus disabled
+- conservative existing K/V cache alternatives where useful
 
-Create a benchmark artefact that records:
-
-```text
-commit
-model hash
-command
-prompt class
-prompt tokens
-output tokens
-PP tok/s
-TG tok/s
-TTFT
-wall time
-peak VRAM
-host RAM
-H2D/D2H bytes
-GPU utilisation
-```
-
-Suggested repository additions:
-
-```text
-benchmarks/qwen35a3b/
-  README.md
-  prompts/
-  run_matrix.py
-  parse_results.py
-  results-schema.json
-```
+Benchmark comparable FreeToken or other runtimes only when the same checkpoint representation and semantics make the comparison honest.
 
 ## Exit gate
 
-Phase 0 is complete when a fresh checkout can reproduce the baseline within an agreed variance band and greedy outputs are stable.
+A fresh checkout and local agent can reproduce the selected baseline within a documented variance band, and deterministic outputs remain stable.
 
 ---
 
-# Phase 1 - Add expert-path observability
+# M1 - Architecture audit, roofline, and telemetry
 
-## Goal
+## Roofline first
 
-Discover where time and bandwidth are actually going, without changing model output.
+For the pinned GGUF, calculate:
 
-## Telemetry to collect
+- bytes in one complete expert bundle
+- host-resident MoE layers under each candidate placement
+- selected expert bytes per generated token
+- pinned and pageable H2D bandwidth
+- per-copy launch latency
+- cached and staged expert kernel latency
+- available overlap with shared expert, Gated DeltaNet, and other work
+- complete expert residency displaced by each candidate cache budget
 
-Per layer and globally:
+Estimate upper bounds for:
 
-- selected expert IDs
-- routing weights
-- number of unique selected experts per token/block
-- expert reuse distance
-- consecutive-token reuse
-- per-layer expert frequency
-- bytes represented by each selected expert
-- CPU-resident versus GPU-resident selection counts
-- bytes copied host-to-device
-- time waiting for copies
-- GPU expert-kernel time
-- CPU expert-kernel time
-- shared-expert time
+```text
+perfect cache
+perfect transfer overlap
+realistic simulated cache
+```
+
+## Runtime telemetry
+
+Behind opt-in flags, collect:
+
+- selected expert IDs and routing weights
+- reuse distance measured globally and per visit to the same layer
+- expert frequency and second-touch rate
+- host/GPU residency at selection time
+- H2D bytes, start/end times, and wait time
+- routed and shared expert kernel time
 - router/top-k time
 - Gated DeltaNet time
 - full-attention time
+- graph capture, replay, and fallback events
 
-Use CUDA events for GPU timing and NVTX ranges for Nsight Systems/Compute. Avoid device synchronisation solely for logging in normal execution. Aggregate counters on device or per request and copy them out after the measured region.
-
-## Trace format
-
-Add an optional machine-readable expert trace. It should contain enough information to simulate cache policies offline without retaining prompts or generated text.
-
-Example logical record:
-
-```json
-{
-  "token_index": 42,
-  "layer": 17,
-  "experts": [11, 28, 63, 91, 107, 153, 188, 221],
-  "weights": [0.21, 0.18, 0.14, 0.12, 0.11, 0.09, 0.08, 0.07]
-}
-```
-
-## CLI surface
-
-Tentative flags:
-
-```text
---expert-stats
---expert-trace FILE
---expert-trace-max-tokens N
---expert-nvtx
-```
-
-They must be off by default.
+Use CUDA events and NVTX. Do not synchronize the device solely for logging during normal execution.
 
 ## Exit gate
 
-- Disabled telemetry adds no measurable overhead.
-- Enabled aggregate telemetry adds less than 2% overhead.
-- Trace output is deterministic under greedy decoding.
-- We can attribute most token time to named stages.
+Most decode time can be attributed to named stages, and the perfect-transfer-removal bound justifies further work.
 
 ---
 
-# Phase 2 - Offline cache simulation
+# M2 - Offline placement and cache simulation
 
-## Goal
+The simulator must compare more than eviction policies:
 
-Prove that a dynamic cache has enough locality to justify invasive runtime work.
+1. current whole-layer placement
+2. profile-guided whole-layer placement
+3. static per-layer hot experts
+4. transfer staging without persistence
+5. per-layer cache with second-touch admission
+6. global or segmented cache
+7. CLOCK, segmented LRU, and frequency/recency hybrids
 
-Implement a trace simulator for:
+Use byte capacities, not expert counts. Include:
 
-- LRU
-- segmented LRU
-- LFU with ageing
-- static top-N per layer
-- global static top-N
-- recency/frequency hybrid
-- layer-weighted budgets
-- optional pinning of consistently hot experts
+- expert bundle sizes
+- whole layers displaced by cache reservation
+- compulsory and capacity misses
+- admission and eviction traffic
+- host memory and PCIe cost
+- compact-dispatch overhead estimate
+- warm-up duration
+- hit rate and value per MiB by workload
 
-Simulate both count-based and byte-based cache capacities. The real cache is constrained by bytes, not number of experts.
-
-Report:
-
-- expert hit rate
-- byte-weighted hit rate
-- estimated H2D bytes avoided per token
-- compulsory versus capacity misses
-- per-layer value of one additional MiB
-- cache churn
-- expected warm-up duration
-- hit rate by workload type
-
-Use measured transfer and kernel costs from the target machine to estimate latency rather than treating every hit as equally valuable.
-
-## Important decision gate
-
-Do not proceed directly to a global dynamic cache if traces show little reuse. Possible pivots include:
-
-- static per-layer hot sets
-- next-layer prefetch without persistence
-- larger full-layer streaming buffers
-- more aggressive existing `--fit` placement
-- kernel work rather than cache work
-
-## Exit gate
-
-Proceed when at least one practical cache budget predicts a material reduction in H2D traffic on representative coding-agent traces.
-
----
-
-# Phase 3 - Static hot-expert GPU cache
-
-## Goal
-
-Build the simplest exact proof that per-expert GPU residency can beat whole-tensor placement.
-
-A static hot set avoids eviction, background copies, and policy races. It validates the graph and kernel changes before adding a dynamic controller.
-
-## Cache unit
-
-Treat an expert as one atomic logical object containing all tensors required to execute it:
-
-- gate/up, or fused gate-up
-- down projection
-- associated scales/metadata
-
-A cache entry is keyed by at least:
+## Decision tree
 
 ```text
-(layer, expert_id, tensor_layout, quant_type, model_generation)
+better whole-layer placement sufficient? -> stop there
+transfer overlap sufficient?             -> stop there
+static hot experts sufficient?           -> stop there
+session changes justify dynamic policy?  -> build dynamic cache
 ```
 
-Sibling tensors must be promoted and evicted together.
+---
 
-## Preferred first implementation
+# M3 - One-layer fixed-shape CUDA proof
 
-Use a trace-generated static hot set and fixed VRAM buffers allocated at startup.
+Before a model-wide cache, build a synthetic or isolated Qwen3.6 MoE-layer test.
 
-For every layer:
+Prove all hit counts from zero to eight using the same graph topology:
 
-1. Router produces original expert IDs and weights.
-2. A device-resident map identifies hot hits and cold misses.
-3. Hot experts execute from compact GPU-resident storage.
-4. Cold experts use the existing exact fallback path.
-5. Weighted outputs are combined with the existing shared-expert result.
-
-Do not change the router or reduce expert count.
-
-## Two implementation shapes to test
-
-### A. Layer-local compact hot banks
-
-Each layer receives a small compact bank containing its chosen experts. This is simpler and may work with fewer kernel changes.
-
-### B. Global fixed-size slots with indirection
-
-All layers share one slot pool. This uses VRAM more efficiently but requires kernels to follow `(layer, expert) -> slot` indirection.
-
-Start with A unless the trace simulator shows that fixed per-layer partitioning wastes too much VRAM.
-
-## CUDA graph requirement
-
-Cache buffers and mapping-table addresses must remain stable. Updating cache contents later must not require a new graph shape. The graph may read changing metadata from fixed device buffers.
+- cache-slot and staging-slot indirection
+- fixed masks and eight routed lanes
+- expert 0 and repeated-ID edge cases
+- atomic gate/up/down sibling handling
+- exact weighted reduction
+- no synchronous router D2H read
+- no allocation or tensor construction in the token loop
+- CUDA graph replay without recapture
+- output agreement with the current MoE path
 
 ## Exit gate
 
-On at least two representative workloads:
-
-- decode improves by at least 5% over the best Phase 0 baseline
-- prompt processing regresses by less than 2%, or the feature is disabled for prefill
-- greedy output matches baseline
-- no unbounded memory growth occurs
-
-If the static cache cannot clear this gate, do not build a dynamic LRU yet.
+The all-hit and mixed hit/miss paths are correct and at least one realistic mixture is faster than the corresponding baseline operation.
 
 ---
 
-# Phase 4 - Dynamic expert cache
+# M4 - Model-wide static optimization
 
-## Goal
+Implement and compare independently:
 
-Turn the static proof into an adaptive cache that learns the current session's routing distribution.
+- profile-guided complete-layer placement
+- layer-local static hot banks
+- global fixed static slots when per-layer partitioning wastes too much VRAM
+- fixed miss-staging buffers without persistent admission
 
-## Design constraints
+Prompt processing initially bypasses cache promotion.
 
-- All VRAM is allocated up front.
-- Slot addresses are stable.
-- Entries cannot be evicted while referenced by an in-flight kernel.
-- Promotion and eviction are asynchronous where possible.
-- A cache miss for the current token must always have an exact fallback.
-- Cache policy must be optional and fully bypassable.
+## Exit gate
 
-## Promotion strategy
+At least two representative workloads improve materially without unacceptable PP regression. Otherwise pivot to transfer overlap or kernels and do not build a dynamic cache.
 
-The safest initial policy is **promote for future tokens**:
+---
 
-1. Execute the current miss using the existing path.
-2. Schedule an asynchronous copy into a cache slot.
-3. Mark the entry valid only after a CUDA event completes.
-4. Use it on a later token.
+# M5 - Asynchronous GPU miss pipeline
 
-This avoids stalling the current token purely to populate the cache. A later policy may decide that immediate transfer is worthwhile.
-
-## Eviction strategy
-
-Start with segmented LRU:
-
-- probationary segment for new entries
-- protected segment for repeated hits
-- workload/session reset hooks
-- optional pinned static entries
-
-Track byte cost and transfer cost, not just access count.
-
-## Device metadata
-
-Maintain fixed-address device tables for:
-
-- expert-to-slot mapping
-- slot state
-- generation/version
-- ready event or epoch
-- compact expert index used by kernels
-
-Host policy decisions may update these tables asynchronously, but the token path should not depend on a CPU round trip when all selected experts hit.
-
-## Tentative CLI
+Initial miss semantics:
 
 ```text
---expert-cache-mib N
---expert-cache-policy off|static|lru|slru
---expert-cache-warmup-tokens N
---expert-cache-static-map FILE
---expert-cache-stats
+cache hit  -> GPU resident slot
+cache miss -> fixed staging bank -> GPU execution
+fallback   -> existing exact runtime path
 ```
 
-## Exit gate
+No new CPU executor is introduced here.
 
-- Dynamic cache matches or beats the best static policy across mixed workloads.
-- It does not regress a no-locality workload materially.
-- It survives long agent sessions without stale mappings, corruption, or memory leaks.
-- CUDA graph reuse remains effective.
+Use:
+
+- one main compute stream
+- one or two expert-copy/promotion streams
+- fixed staging buffers
+- CUDA events rather than global synchronization
+- shared-expert and hit computation while misses transfer
+- mapping epochs so a slot cannot be reused while an earlier graph reads it
+
+Promotions may be committed one token later to avoid a CPU round trip in the critical path.
 
 ---
 
-# Phase 5 - Calibrated GPU miss execution
+# M6 - Dynamic cache, only if justified
 
-## Goal
+Admission is as important as eviction. Do not insert every miss.
 
-For a non-resident selected expert, decide whether to:
-
-1. copy it to the GPU and execute there,
-2. use the existing CPU path,
-3. split independent misses between CPU and GPU so both work concurrently.
-
-This adopts the useful FreeToken principle without replacing `ik_llama.cpp`'s execution stack.
-
-## Machine calibration
-
-At startup or through a separate calibration tool, measure:
-
-- pinned H2D latency and bandwidth for real expert sizes
-- pageable H2D fallback
-- GPU quantised expert GEMV/GEMM latency at relevant token counts
-- CPU expert latency at relevant thread counts
-- overlap efficiency between CPU execution, H2D copies, and GPU kernels
-- costs for fused gate-up and down layouts
-
-Persist calibration by hardware, driver, build, model signature, and quant.
-
-## GPU-first policy
-
-The default policy should favour GPU execution when:
+Candidate first policy:
 
 ```text
-copy_time + gpu_compute_time < cpu_compute_time
+per-layer or segmented pool
+second-touch admission
+CLOCK or segmented-LRU eviction
+protected and probationary entries
+no promotion during large prefill
+optional pinned static hot set
 ```
 
-but the real scheduler must account for overlap and queue state. Several misses from the same token are independent and may be partitioned.
-
-## Streams
-
-Likely stream structure:
-
-- main model/compute stream
-- expert-copy stream A
-- expert-copy stream B or promotion stream
-- events connecting copied experts to compute
-
-Avoid global synchronisation. Use fixed staging buffers and preallocated workspaces.
+All storage is preallocated. Eviction changes metadata and contents, never graph shapes or buffer addresses.
 
 ## Exit gate
 
-The adaptive miss policy must outperform the best fixed strategy (`always transfer` or `always CPU`) on a mixed benchmark set. If it cannot, keep the simpler fixed winner.
+Dynamic policy beats the best static/transfer-only result on session-changing traces and does not materially regress low-locality workloads.
 
 ---
 
-# Phase 6 - Prefill-specific expert streaming
+# M7 - Prefill/decode use of the VRAM pool
 
-## Goal
+Prefill and decode are different regimes.
 
-Prevent a decode-optimised cache from harming prompt processing.
+For large prefills:
 
-During large prefills, many or nearly all experts may be selected across the batch. A small LRU can churn and provide little value. The runtime should treat prefill and single-token decode as different execution regimes.
+- bypass decode-cache admission
+- use the cache pool as one or two layer/expert streaming banks where safe
+- overlap next-layer transfer with current-layer computation
+- preserve enough workspace for the fastest PP kernels
+- collect recent routing to seed decode state
 
-## Initial strategy
+At the phase transition, reuse preallocated memory without process restart or mid-token allocation.
 
-At a configurable token-count threshold:
-
-- bypass decode-cache insertion
-- reserve two layer-sized GPU staging buffers
-- stream the next layer's required expert data while the current layer computes
-- use pinned host memory
-- restore or retain the decode cache after prefill according to measured cost
-
-Possible policies:
-
-```text
-retain: keep decode cache and use separate prefill buffers
-shrink: temporarily donate cold cache slots to prefill workspace
-rebuild: release decode contents and warm from subsequent decode routing
-```
-
-Start with `retain` because it is easiest to reason about. Add elastic reuse only if memory pressure requires it.
-
-## Exit gate
-
-- Long-prompt throughput is no worse than baseline.
-- Decode begins without an excessive cache-rewarm penalty.
-- TTFT improves on representative 8K-32K prompts or the mode remains disabled.
+Start with a conservative retained-cache policy. Add elastic repurposing only after correctness and memory accounting are stable.
 
 ---
 
-# Phase 7 - Qwen/SM89 GPU kernel specialisation
+# M8 - Qwen3.6/SM89 kernel specialization
 
-## Goal
+Only optimize profiler-proven residual bottlenecks.
 
-Optimise only the kernels proven dominant after the memory system is working.
+Candidate targets:
 
-Candidate targets include:
+- fused router, softmax/top-k, hit classification, and slot remapping
+- fixed-width batch-one quantized expert GEMV
+- fused cached-hit/staged-miss weighted reduction
+- overlap of shared and routed experts
+- reduced host launch and scheduler overhead
+- Qwen Gated DeltaNet projection/update fusion where still dominant
 
-1. Fused router projection + softmax/top-k for batch one.
-2. Expert-hit remapping and compact dispatch.
-3. Fused quantised gate-up + SiLU + multiply for Qwen expert shapes.
-4. Fused/combined down projection and weighted reduction.
-5. Overlap of shared expert with routed experts.
-6. Packed multi-expert GEMV for one-token decode.
-7. Qwen Gated DeltaNet projection/update fusion if it remains a major cost.
-8. Reduced host scheduling and launch overhead.
-
-The existing `mmq_id`, fused MoE, and DeltaNet implementations are the starting point. New kernels are justified only by profiler traces and must include a fallback for unsupported quant/layout combinations.
-
-## Kernel policy
-
-Optimise for the actual target first:
-
-```text
-SM89
-batch = 1
-Qwen3.6-35B-A3B dimensions
-8 selected experts
-existing practical GGUF quant
-```
-
-Do not compromise correctness or maintainability to support every architecture in the first patch.
-
-## Exit gate
-
-Each kernel lands independently with:
-
-- isolated correctness tests
-- microbenchmarks
-- end-to-end impact
-- no regression on the fallback path
+The first optimized kernel may support one exact existing GGUF type and layout. Unsupported types must use the generic fallback.
 
 ---
 
-# Phase 8 - Adaptive VRAM controller
+# M9 - `--fit` integration and autotuning
 
-## Goal
-
-Make `--fit` account for the expert cache as a first-class GPU resource.
-
-The final VRAM budget is shared by:
+Treat VRAM as a single budget shared by:
 
 ```text
-fixed non-expert model tensors
-resident expert tensors selected by existing placement
-new dynamic expert cache
-KV cache
+fixed non-expert tensors
+whole resident expert tensors
+expert cache/staging pool
+K/V cache
 Gated DeltaNet state
-compute buffers
+compute workspace
 CUDA graph allocations
-optional speculative state
 safety margin
+optional speculative state
 ```
 
-## Initial implementation
+At startup, choose:
 
-Do not dynamically change KV precision or context length. Compute a safe startup budget:
+- whole-layer versus granular expert residency
+- expert pool size
+- per-layer quotas
+- staging-bank count
+- prefill threshold
+- policy mode
 
-1. Reserve fixed model and compute requirements.
-2. Reserve the requested context and current cache precision.
-3. Reserve graph/safety headroom.
-4. Assign the remaining budget to expert-cache slots.
-5. Refuse or reduce the cache cleanly if the budget is insufficient.
-
-Tentative UX:
-
-```text
---expert-cache-mib auto
---expert-cache-min-mib N
---expert-cache-max-mib N
---gpu-fit-margin N
-```
-
-## Later extension
-
-Once stable, the controller may compare the marginal value of:
-
-- one more expert-cache slot
-- more context
-- higher KV precision
-- MTP state
-- larger prefill workspace
-
-That is a later optimisation, not a prerequisite for the first cache.
+Never reallocate graph-visible buffers during token generation.
 
 ---
 
-# Speculation policy
+# Deferred extension points
 
-MTP is deliberately outside the critical path of the first programme.
+## Weight/expert codecs
 
-Reasons:
-
-- it consumes extra model/cache/state memory
-- recurrent checkpoint storage grows with speculative depth
-- Qwen MoE verification can touch a larger union of experts
-- high acceptance does not guarantee a speedup
-- the same VRAM may produce more value as expert-cache capacity
-
-After Phase 6, benchmark these as competitors:
-
-1. no speculation
-2. suffix or n-gram speculation
-3. MTP with `n_max=1`
-4. autotuned shallow MTP with a strict VRAM cap
-5. self-speculation followed by one-token MTP fallback
-
-The controller should retain MTP only when it improves end-to-end latency on the current workload. It is not enabled simply because the checkpoint contains an MTP head.
-
----
-
-# Quantisation and context-compression extension points
-
-No new quantisation work is required in the initial phases. However, avoid designs that make it impossible later.
-
-## Weight/expert codec boundary
-
-The expert cache must copy and execute experts through metadata that includes:
+Cache metadata must retain:
 
 ```text
-quant type
+ggml type
 block size
-row layout
-scale layout
-fused or split gate/up layout
-bytes per expert
-supported CUDA kernel
+row and scale layout
+fused/split gate-up representation
+bytes per expert bundle
+supported CUDA path
 ```
 
-This leaves room for future IQ, QTIP/EXL3-like, ParoQuant, or other expert representations without redesigning the cache policy.
+This leaves room for existing and future weight quants without making cache precision depend on residency.
 
-## Context codec boundary
+## Context codecs
 
-Future work may add a context-cache abstraction for:
+Future work may add rotated INT4, TurboQuant/Rotor-derived codecs, mixed K/V precision, or compressed cold recurrent checkpoints. Expert-cache metadata must remain independent of KV representation.
 
-- q8/q4 baselines
-- rotated INT4
-- TurboQuant/Rotor-derived codecs
-- mixed K/V precision
-- cold recurrent-checkpoint compression
+## Speculation
 
-The first inference patches should not couple expert-cache metadata to a specific KV representation.
+After the non-speculative engine is stable, compare:
 
-## Context-management boundary
+- no speculation
+- suffix/ngram speculation
+- shallow MTP under a strict VRAM cap
 
-Semantic Gated DeltaNet checkpoints and block-based prompt reuse remain valuable future work, but should be developed after GPU expert execution is measured and stable.
+MTP remains enabled only when it improves end-to-end latency on the current workload. It is not part of the initial success requirement.
 
 ---
 
-# Proposed source layout
+# Source seams
 
-Names are tentative and should follow repository conventions after the first implementation review.
+Likely integration points:
+
+- `src/llama-load-tensors.cpp`: placement and expert tensor creation
+- `src/llama-model-loader.cpp`: GGUF provenance and host-backed ranges
+- `src/llama-expert-io.h`: expert file ranges and deferred bytes
+- `src/graphs/build_qwen35.cpp`: internal shared Qwen hybrid graph implementation used by Qwen3.6
+- `src/llama-build-context.*`: common MoE graph construction
+- `ggml/src/ggml-backend.cpp`: active-expert scheduling and copies
+- `ggml/src/ggml-cuda/`: indirect quantized MoE and future slot/staging kernels
+- `examples/llama-bench/`: native JSON PP/TG measurements
+- `benchmarks/qwen36-35b/`: experiment runner and evidence protocol
+
+Policy, storage, and CUDA execution should remain separate:
 
 ```text
-src/
-  llama-expert-cache.h
-  llama-expert-cache.cpp
-  llama-expert-policy.h
-  llama-expert-policy.cpp
-  llama-expert-profile.h
-  llama-expert-profile.cpp
-
-ggml/src/ggml-cuda/
-  expert-cache.cu
-  expert-cache.cuh
-
-examples/
-  expert-cache-bench/
-
-benchmarks/
-  qwen35a3b/
-
-tests/
-  test-expert-cache.cpp
-  test-expert-policy.cpp
+profile records facts
+policy decides residency/admission
+gpu pool owns fixed buffers and epochs
+CUDA kernels execute mapped experts
 ```
 
-Keep policy, storage, and CUDA execution separate:
+---
 
-- **profile** records facts
-- **policy** decides residency and miss handling
-- **cache** owns fixed buffers and lifetime
-- **CUDA kernels** execute mapped experts
+# Milestones
+
+1. **EXP-0001 / M0:** baseline harness and local-agent evidence round trip
+2. **M1:** roofline, transfer microbenchmarks, and expert telemetry
+3. **M2:** placement/cache simulator and hard go/no-go result
+4. **M3:** one-layer fixed-shape CUDA proof
+5. **M4:** model-wide static alternatives
+6. **M5:** asynchronous GPU miss staging
+7. **M6:** dynamic admission/eviction if justified
+8. **M7:** prefill/decode pool reuse
+9. **M8:** Qwen3.6/SM89 kernels
+10. **M9:** `--fit` integration and startup autotuning
+
+Each milestone must be independently reviewable, benchmarkable, and revertible.
 
 ---
 
-# Correctness strategy
+# Immediate task: EXP-0001
 
-## Unit-level
+EXP-0001 adds no inference optimization. It creates:
 
-- expert ID remapping
-- slot allocation/eviction
-- event/epoch handling
-- sibling tensor atomicity
-- quant block offsets
-- cache hit/miss partitioning
-- weighted output merge
-- policy decisions from fixed calibration inputs
+- deterministic benchmark definitions
+- hardware and model fingerprinting
+- native `llama-bench` JSON collection
+- deterministic `llama-cli` output hashes
+- raw and normalized evidence bundles
+- a local-agent handoff that builds, runs, commits, and pushes results
 
-## Model-level
-
-For short deterministic prompts:
-
-- compare router selections against baseline
-- compare per-layer MoE outputs within tolerance
-- compare final logits
-- compare greedy token sequence
-
-Test:
-
-- no hits
-- all hits
-- mixed hits/misses
-- repeated eviction
-- cache disabled
-- context reuse
-- graph reuse
-- long-running server requests
-
-## Failure behaviour
-
-On allocation, unsupported-layout, or cache-consistency failure:
-
-- log a precise reason
-- disable the optimisation or fall back for that request
-- never continue with an incomplete expert tuple
-- never silently change routing
-
----
-
-# Performance acceptance gates
-
-These are project gates, not promised results.
-
-## Instrumentation
-
-- less than 2% overhead when aggregate stats are enabled
-- no measurable overhead when disabled
-
-## Static cache
-
-- at least 5% decode improvement on two representative workloads
-- less than 2% prefill regression, or automatic prefill bypass
-
-## Dynamic cache
-
-- beats static allocation on a mixed/session-changing trace
-- no material regression on a low-locality trace
-
-## Miss controller
-
-- beats the best fixed CPU/GPU miss policy on the mixed suite
-
-## Project success target
-
-A successful first release should aim for:
-
-- **15-30% lower representative end-to-end latency** versus the best current `ik_llama.cpp` configuration on the same model/quant/hardware, or
-- a comparably strong decode gain with no TTFT/prefill regression.
-
-A larger gain is possible if current execution is transfer-bound, but it must not be assumed.
-
----
-
-# Key risks and planned mitigations
-
-## Expert locality is weaker than expected
-
-Mitigation: Phase 2 simulator is a hard decision gate. Pivot to prefetch or kernels if persistent caching is not valuable.
-
-## Cache indirection slows GPU hits
-
-Mitigation: prove a static layer-local bank first; fuse mapping into the dispatch kernel only after measurement.
-
-## CUDA graph recapture removes the gain
-
-Mitigation: allocate fixed buffers and fixed-address maps up front. Update contents and metadata in place.
-
-## Prefill churn overwhelms the cache
-
-Mitigation: use separate prefill mode and disable cache insertion for large batches.
-
-## Pinned host memory helps prefill but harms decode or system stability
-
-Mitigation: measure separately, cap pinned allocation, and expose an explicit fallback.
-
-## Quant layouts make per-expert slices awkward
-
-Mitigation: support one known Qwen GGUF layout first, validate block alignment, and add layout descriptors before generalisation.
-
-## Cache VRAM displaces more valuable resources
-
-Mitigation: report marginal gain per MiB and make cache allocation explicit. MTP is disabled first under pressure.
-
-## Floating-point accumulation order changes greedy output
-
-Mitigation: preserve operation order where practical, compare intermediate outputs, and keep an exact fallback.
-
----
-
-# Milestone sequence
-
-1. **M0 - Baseline harness**
-   - pinned checkpoint, scripts, schema, reproducible measurements
-2. **M1 - Expert telemetry**
-   - routing traces, CUDA timings, H2D counters, NVTX
-3. **M2 - Cache simulator**
-   - offline policies and predicted value per MiB
-4. **M3 - Static hot cache**
-   - fixed hot experts, exact hot/cold split, end-to-end proof
-5. **M4 - Dynamic cache**
-   - fixed slot pool, asynchronous promotion, safe eviction
-6. **M5 - Calibrated miss scheduler**
-   - GPU transfer versus CPU fallback, concurrent execution where useful
-7. **M6 - Prefill mode**
-   - double-buffered layer streaming and cache-bypass policy
-8. **M7 - Qwen/SM89 kernels**
-   - only profiler-proven bottlenecks
-9. **M8 - Adaptive VRAM budget**
-   - integration with `--fit` and safe automatic sizing
-10. **M9 - Optional extensions**
-    - speculation, context codecs, recurrent checkpoint compression, new quants
-
-Each milestone should be reviewable and benchmarkable independently. Avoid one giant branch that combines policy, kernels, quantisation, and context changes.
-
----
-
-# First concrete implementation task
-
-The first code change after this plan should be **telemetry only**:
-
-1. Add per-layer selected-expert counters.
-2. Add host-to-device expert-byte counters.
-3. Add optional per-token expert trace output.
-4. Add CUDA-event timing around the routed expert path.
-5. Add a benchmark parser that produces a compact JSON summary.
-
-This gives the next coding agent a measurable target and prevents us from building a cache that the routing traces do not justify.
-
----
-
-## Definition of done for the initial programme
-
-The GPU-first inference programme is complete when:
-
-- Qwen3.6-35B-A3B runs stably on the 16 GB RTX 4060 Ti with the pinned GGUF quant.
-- The expert cache and miss policy are optional and have clean fallbacks.
-- Greedy correctness and routing semantics are preserved.
-- Long coding-agent traces show stable memory use.
-- Benchmark results are reproducible from repository scripts.
-- The best new configuration materially beats the best pre-change `ik_llama.cpp` configuration on the target machine.
-- Quantisation and context-codec interfaces remain open, but no unproven quant method is required for the result.
+The next optimization decision will be made from that committed evidence, not from assumptions.
