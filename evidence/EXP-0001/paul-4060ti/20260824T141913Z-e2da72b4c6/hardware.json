@@ -1,0 +1,91 @@
+{
+  "binaries": {
+    "llama_bench": {
+      "filename": "llama-bench.exe",
+      "sha256": "3fc7288ff9c0ff51f1355be7778650f69770c3e814e541d3bddc7ddbf9c2b6df",
+      "size_bytes": 297984
+    },
+    "llama_cli": {
+      "filename": "llama-cli.exe",
+      "sha256": "398fe7930e94437a534757e2586f39e38f304afeb467ce6fa8da73ec018344c0",
+      "size_bytes": 2280448
+    }
+  },
+  "captured_at": "2026-08-24T14:19:13Z",
+  "hostname_sha256_prefix": "1c25f77a8cfb4402",
+  "logical_cpu_count": 24,
+  "machine_id": "paul-4060ti",
+  "memory_bytes": null,
+  "platform": "Windows-10-10.0.26200-SP0",
+  "probes": {
+    "cmake": {
+      "argv": [
+        "cmake",
+        "--version"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "cmake version 4.3.2\n\nCMake suite maintained and supported by Kitware (kitware.com/cmake).\n"
+    },
+    "nvcc": {
+      "argv": [
+        "nvcc",
+        "--version"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2026 NVIDIA Corporation\nBuilt on Thu_Mar_19_22:28:55_Pacific_Daylight_Time_2026\nCuda compilation tools, release 13.2, V13.2.78\nBuild cuda_13.2.r13.2/compiler.37668154_0\n"
+    },
+    "nvidia_smi_list": {
+      "argv": [
+        "nvidia-smi",
+        "-L"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "GPU 0: NVIDIA GeForce RTX 4060 Ti (UUID: GPU-97b5231d-ee75-08ce-98bc-7547b74d1c04)\n"
+    },
+    "nvidia_smi_pcie": {
+      "argv": [
+        "nvidia-smi",
+        "--query-gpu=pcie.link.gen.current,pcie.link.gen.max,pcie.link.width.current,pcie.link.width.max",
+        "--format=csv,noheader,nounits"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "1, 4, 8, 8\n"
+    },
+    "nvidia_smi_query": {
+      "argv": [
+        "nvidia-smi",
+        "--query-gpu=name,memory.total,driver_version,pci.bus_id,pstate,clocks.max.sm,power.limit",
+        "--format=csv,noheader,nounits"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "NVIDIA GeForce RTX 4060 Ti, 16380, 596.36, 00000000:01:00.0, P8, 3105, 165.00\n"
+    },
+    "nvidia_topology": {
+      "argv": [
+        "nvidia-smi",
+        "topo",
+        "-m"
+      ],
+      "returncode": 255,
+      "stderr": "",
+      "stdout": "ERROR: Option -m is missing its value. Please run 'nvidia-smi -h' for help.\n\n"
+    }
+  },
+  "python": "3.10.6 (tags/v3.10.6:9c7b4bd, Aug  1 2022, 21:53:49) [MSC v.1932 64 bit (AMD64)]",
+  "source": {
+    "branch": "plan/qwen-single-gpu-inference-roadmap",
+    "commit": "e2da72b4c6acf05053f17bdbed6c58d0b313a927",
+    "describe": "e2da72b4",
+    "dirty": true,
+    "remote": "git@github.com:pmaeria/ik_llama.cpp.git",
+    "status": [
+      "?? evidence/"
+    ]
+  },
+  "threads_used": 12
+}

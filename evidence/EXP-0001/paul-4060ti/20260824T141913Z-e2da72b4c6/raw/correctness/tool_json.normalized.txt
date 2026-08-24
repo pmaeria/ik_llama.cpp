@@ -1,0 +1,9 @@
+<think>
+Here's a thinking process:
+
+1.  **Analyze User Input:**
+   - **Output Format:** One compact JSON object, nothing else.
+   - **Keys & Order:** `action`, `model`, `gpu`, `measurements`, `mtp` (must be in this exact order).
+   - **Values:**
+     - `action`: `benchmark`
+     - `model`: `Qwen3.6-3

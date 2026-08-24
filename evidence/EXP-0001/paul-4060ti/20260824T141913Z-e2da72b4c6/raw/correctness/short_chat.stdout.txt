@@ -1,0 +1,12 @@
+
+
+<think>
+Here's a thinking process:
+
+1.  **Analyze User Input:**
+   - **Task:** Validate deterministic local inference.
+   - **Topic:** Why a fixed-shape CUDA graph can help batch-one Mixture-of-Experts (MoE) decoding.
+   - **Constraints:** 
+     - Exactly six numbered sentences.
+     - Must mention: expert routing, buffer addresses, launch overhead.
+     - No heading, table, code
